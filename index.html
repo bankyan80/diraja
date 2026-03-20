@@ -91,7 +91,6 @@
         }
         @keyframes spin { to { transform: rotate(360deg); } }
 
-        /* Slider Styles */
         .slider-container {
             position: relative;
             width: 100%;
@@ -183,7 +182,8 @@
     <main class="container mx-auto px-6 pb-24">
         <div id="loader" class="flex flex-col items-center py-20">
             <div class="spinner mb-4"></div>
-            <p id="loader-text" class="text-gold text-[10px] uppercase tracking-[0.4em] animate-pulse">Menata Katalog Diraja...</p>
+            <p id="loader-text" class="text-gold text-[10px] uppercase tracking-[0.4em] animate-pulse">Menghubungkan ke Gudang Diraja...</p>
+            <button id="retry-btn" onclick="fetchFreshData()" class="hidden mt-4 px-6 py-2 border border-gold text-gold text-[10px] uppercase tracking-widest rounded-full hover:bg-gold hover:text-royal-blue transition-all">Muat Ulang Paksa</button>
         </div>
 
         <div id="product-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8 hidden"></div>
@@ -207,10 +207,11 @@
     </footer>
 
     <script>
+        // URL spreadsheet dipastikan menggunakan format pub?output=csv untuk meminimalkan masalah CORS
         const DATA_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vQ9-bTM9z7Fpx0t93QLt355DyWkoIIVpqb5gEsz84cYzweI4WJLd5SZZU-YeIuzcw/pub?gid=1711013733&single=true&output=csv";
         const FALLBACK_IMG = `data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100' height='100' viewBox='0 0 24 24' fill='none' stroke='%23d4af37' stroke-width='1' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='4' y='2' width='16' height='20' rx='2' ry='2'%3E%3C/rect%3E%3Cline x1='12' y1='18' x2='12.01' y2='18'%3E%3C/line%3E%3C/svg%3E`;
-        const CACHE_KEY = "diraja_products_cache";
-        const CACHE_EXPIRY = 3600000; // 1 jam dalam milidetik
+        const CACHE_KEY = "diraja_products_cache_v2";
+        const CACHE_EXPIRY = 1800000; // 30 menit
 
         let allProducts = [];
         let currentFilter = 'premium'; 
@@ -219,44 +220,59 @@
         let currentSlideIndex = 0;
 
         async function initApp() {
-            // Cek Cache terlebih dahulu untuk kecepatan maksimal
             const cachedData = localStorage.getItem(CACHE_KEY);
             const cacheTime = localStorage.getItem(CACHE_KEY + "_time");
             
-            if (cachedData && cacheTime && (Date.now() - cacheTime < CACHE_EXPIRY)) {
-                allProducts = JSON.parse(cachedData);
-                displayProducts();
-                // Tetap fetch di latar belakang untuk memperbarui data
-                fetchFreshData();
-            } else {
-                fetchFreshData();
+            if (cachedData && cacheTime && (Date.now() - parseInt(cacheTime) < CACHE_EXPIRY)) {
+                try {
+                    allProducts = JSON.parse(cachedData);
+                    if (allProducts.length > 0) {
+                        displayProducts();
+                        // Update background
+                        fetchFreshData(true);
+                        return;
+                    }
+                } catch(e) {
+                    localStorage.removeItem(CACHE_KEY);
+                }
             }
+            fetchFreshData();
         }
 
-        async function fetchFreshData() {
-            try {
-                // Tambahkan timeout agar tidak loading selamanya
-                const controller = new AbortController();
-                const timeoutId = setTimeout(() => controller.abort(), 10000);
+        async function fetchFreshData(isBackground = false) {
+            if (!isBackground) {
+                document.getElementById('loader').classList.remove('hidden');
+                document.getElementById('retry-btn').classList.add('hidden');
+                document.getElementById('loader-text').innerText = "Menghubungkan ke Gudang Diraja...";
+            }
 
-                const res = await fetch(`${DATA_URL}&t=${new Date().getTime()}`, { signal: controller.signal });
-                clearTimeout(timeoutId);
+            try {
+                // Gunakan cache buster unik
+                const timestamp = new Date().getTime();
+                const res = await fetch(`${DATA_URL}&cache_buster=${timestamp}`, {
+                    method: 'GET',
+                    mode: 'cors',
+                    credentials: 'omit'
+                });
+
+                if (!res.ok) throw new Error("Server spreadsheet tidak merespon");
 
                 const csv = await res.text();
                 const parsed = parseCSV(csv);
                 
                 if (parsed.length > 0) {
                     allProducts = parsed;
-                    // Simpan ke Cache
                     localStorage.setItem(CACHE_KEY, JSON.stringify(allProducts));
                     localStorage.setItem(CACHE_KEY + "_time", Date.now().toString());
                     displayProducts();
+                } else {
+                    throw new Error("Data kosong setelah di-parsing");
                 }
             } catch (e) {
-                console.error("Gagal memuat data baru:", e);
-                if (allProducts.length === 0) {
-                    document.getElementById('loader-text').innerText = "Gagal memuat data. Periksa koneksi Anda.";
-                    document.getElementById('loader-text').classList.remove('animate-pulse');
+                console.error("Fetch error:", e);
+                if (!isBackground && allProducts.length === 0) {
+                    document.getElementById('loader-text').innerText = "Gagal memuat data. Pastikan Spreadsheet dipublikasikan ke Web sebagai CSV.";
+                    document.getElementById('retry-btn').classList.remove('hidden');
                 }
             }
         }
@@ -264,71 +280,77 @@
         function displayProducts() {
             document.getElementById('loader').classList.add('hidden');
             document.getElementById('product-grid').classList.remove('hidden');
-            document.querySelectorAll('.category-tab').forEach(t => t.classList.remove('active'));
-            document.getElementById(`tab-${currentFilter}`).classList.add('active');
             render();
         }
 
         function cleanText(text) {
             if (!text) return "";
-            return text.replace(/^["'\s\uFEFF\xA0]+|["'\s\uFEFF\xA0]+$/g, '').trim();
+            // Menghilangkan BOM dan karakter aneh lainnya
+            return text.replace(/^\uFEFF/, '').replace(/^["'\s]+|["'\s]+$/g, '').trim();
         }
 
         function cleanImageUrl(url) {
             if (!url) return null;
             let clean = url.trim().replace(/^"|"$/g, '');
-            if (!clean.startsWith('http')) return null;
+            if (!clean.toLowerCase().startsWith('http')) return null;
             return clean;
         }
 
         function parseCSV(text) {
+            if (!text || text.length < 10) return [];
+            
             const lines = text.split(/\r?\n/);
             const result = [];
             const seen = new Set();
 
-            lines.slice(1).forEach((line, i) => {
-                if (!line.trim()) return;
+            // Mulai dari indeks 1 untuk melewati header
+            for (let i = 1; i < lines.length; i++) {
+                const line = lines[i].trim();
+                if (!line) continue;
                 
                 const cols = [];
                 let cell = '';
                 let inQuotes = false;
+                
                 for(let char of line) {
                     if(char === '"') inQuotes = !inQuotes;
-                    else if(char === ',' && !inQuotes) { cols.push(cell.trim()); cell = ''; }
+                    else if(char === ',' && !inQuotes) { cols.push(cell); cell = ''; }
                     else cell += char;
                 }
-                cols.push(cell.trim());
+                cols.push(cell);
 
                 const name = cleanText(cols[0]);
-                const priceStr = cols[2]?.replace(/\D/g, '') || "0";
-                const price = parseInt(priceStr);
+                const priceRaw = cols[2] ? cols[2].toString().replace(/\D/g, '') : "0";
+                const price = parseInt(priceRaw);
 
-                if(!name || price < 500000 || seen.has(name)) return;
+                // Validasi minimal: Nama ada dan harga di atas 500rb
+                if(!name || isNaN(price) || price < 500000 || seen.has(name)) continue;
                 seen.add(name);
 
                 let category = 'education';
                 if (price > 3000000) category = 'premium';
                 else if (price >= 2000000) category = 'semi-premium';
 
-                const fullDesc = cleanText(cols[14]) || "Deskripsi produk belum tersedia.";
+                const fullDesc = cleanText(cols[14]) || "Deskripsi produk eksklusif Diraja.";
                 
                 const imgs = [];
+                // Cek kolom D sampai M (index 3 sampai 12)
                 for(let k=3; k<=12; k++) {
                     let imgUrl = cleanImageUrl(cols[k]);
                     if(imgUrl) imgs.push(imgUrl);
                 }
 
                 result.push({
-                    id: i,
+                    id: `prod-${i}`,
                     name: name,
                     price: price,
                     category: category,
                     images: imgs.length ? imgs : [FALLBACK_IMG],
-                    link: cols[13] || '#',
+                    link: cols[13] ? cleanText(cols[13]) : '#',
                     description: fullDesc,
-                    sales: Math.floor(Math.random() * 800) + 50
+                    sales: Math.floor(Math.random() * 500) + 20
                 });
-            });
+            }
             return result;
         }
 
@@ -344,39 +366,22 @@
             sortCriteria = 'price';
             priceOrder = priceOrder === 'asc' ? 'desc' : 'asc';
             document.getElementById('sort-price').innerText = `Harga ${priceOrder === 'asc' ? '↑' : '↓'}`;
-            document.getElementById('sort-price').classList.add('text-gold');
-            document.getElementById('sort-price').classList.remove('text-white/40');
-            document.getElementById('sort-sales').classList.remove('text-gold');
-            document.getElementById('sort-sales').classList.add('text-white/40');
             render();
         }
 
         function setSort(type) {
             sortCriteria = type;
-            document.getElementById('sort-sales').classList.add('text-gold');
-            document.getElementById('sort-sales').classList.remove('text-white/40');
-            document.getElementById('sort-price').classList.remove('text-gold');
-            document.getElementById('sort-price').classList.add('text-white/40');
             render();
         }
 
         function handleImgError(img) {
             img.onerror = null;
             img.src = FALLBACK_IMG;
-            img.className = 'w-full h-full object-contain p-12 opacity-20 bg-black/20';
+            img.className = 'w-full h-full object-contain p-12 opacity-20';
         }
 
         function moveSlide(direction, totalSlides) {
             currentSlideIndex = (currentSlideIndex + direction + totalSlides) % totalSlides;
-            updateSliderPosition();
-        }
-
-        function setSlide(index) {
-            currentSlideIndex = index;
-            updateSliderPosition();
-        }
-
-        function updateSliderPosition() {
             const track = document.getElementById('slider-track');
             if (track) {
                 track.style.transform = `translateX(-${currentSlideIndex * 100}%)`;
@@ -398,7 +403,7 @@
                     <div class="slider-track" id="slider-track">
                         ${p.images.map(img => `
                             <div class="slide">
-                                <img src="${img}" onerror="handleImgError(this)" alt="${p.name}">
+                                <img src="${img}" loading="lazy" onerror="handleImgError(this)" alt="${p.name}">
                             </div>
                         `).join('')}
                     </div>
@@ -413,7 +418,7 @@
                         <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="3" viewBox="0 0 24 24"><path d="M9 5l6 6-6 6"/></svg>
                     </button>
                     <div class="dots-container">
-                        ${p.images.map((_, idx) => `<div class="dot ${idx === 0 ? 'active' : ''}" onclick="setSlide(${idx})"></div>`).join('')}
+                        ${p.images.map((_, idx) => `<div class="dot ${idx === 0 ? 'active' : ''}" onclick="currentSlideIndex=${idx}; moveSlide(0, ${p.images.length})"></div>`).join('')}
                     </div>
                 `;
             }
@@ -427,7 +432,7 @@
                     <p class="text-4xl font-light text-white mb-8">${new Intl.NumberFormat('id-ID', { style: 'currency', currency: 'IDR', maximumFractionDigits: 0 }).format(p.price)}</p>
                 </div>
                 <div class="space-y-4 mb-10">
-                    <h3 class="text-xs font-bold uppercase tracking-widest text-white/40">Deskripsi Lengkap</h3>
+                    <h3 class="text-xs font-bold uppercase tracking-widest text-white/40">Spesifikasi & Deskripsi</h3>
                     <p class="text-white/70 leading-relaxed text-sm whitespace-pre-line">${p.description}</p>
                 </div>
                 <div class="mt-auto pt-8">
@@ -461,12 +466,41 @@
                 return priceOrder === 'asc' ? a.price - b.price : b.price - a.price;
             });
 
+            if (filtered.length === 0) {
+                grid.innerHTML = `<div class="col-span-full py-20 text-center text-white/20 uppercase tracking-widest text-xs">Produk tidak ditemukan</div>`;
+                return;
+            }
+
             filtered.forEach(p => {
                 const card = document.createElement('div');
                 card.className = 'glass-card rounded-[2rem] overflow-hidden flex flex-col h-full group';
                 card.onclick = () => openModal(p.id);
                 card.innerHTML = `
-                    <div class="h-64 bg-black/20 relative w-full m-0 p-0 overflow-hidden">
+                    <div class="h-64 bg-black/20 relative w-full overflow-hidden">
                         <img src="${p.images[0]}" 
+                             loading="lazy"
                              onerror="handleImgError(this)"
-  
+                             class="absolute inset-0 w-full h-full object-cover group-hover:scale-110 transition-transform duration-700" 
+                             alt="${p.name}">
+                        <div class="absolute top-4 left-4 bg-black/60 text-[8px] font-bold px-3 py-1 rounded-full uppercase border border-white/10 backdrop-blur-md z-10">
+                            ${p.category.replace('-', ' ')}
+                        </div>
+                    </div>
+                    <div class="p-8 flex flex-col flex-grow">
+                        <h3 class="font-bold text-base mb-2 line-clamp-2 leading-snug group-hover:text-gold transition-colors">${p.name}</h3>
+                        <p class="text-xl font-black text-gold mb-6">${new Intl.NumberFormat('id-ID', { style: 'currency', currency: 'IDR', maximumFractionDigits: 0 }).format(p.price)}</p>
+                        <div class="mt-auto pt-4 border-t border-white/5 flex items-center justify-between">
+                            <span class="text-[9px] font-bold text-white/30 uppercase tracking-widest">Detail Produk</span>
+                            <div class="w-8 h-8 rounded-full bg-white/5 flex items-center justify-center text-gold group-hover:bg-gold group-hover:text-royal-blue transition-all">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>
+                            </div>
+                        </div>
+                    </div>
+                `;
+                grid.appendChild(card);
+            });
+        }
+    </script>
+</body>
+</html>
+
